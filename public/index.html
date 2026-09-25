@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OTOVOICE</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0d1117;
+        --card: #161b22;
+        --line: #30363d;
+        --text: #e6edf3;
+        --muted: #8b949e;
+        --accent: #58a6ff;
+        --ok: #3fb950;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      main {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 32px 20px 64px;
+      }
+      h1 { margin: 0 0 8px; font-size: 28px; }
+      p { color: var(--muted); }
+      .row { display: flex; gap: 12px; flex-wrap: wrap; margin: 20px 0; }
+      input, button, textarea {
+        font: inherit;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: var(--card);
+        color: var(--text);
+        padding: 10px 12px;
+      }
+      input { flex: 1; min-width: 220px; }
+      button { cursor: pointer; }
+      button.primary { background: var(--accent); color: #0d1117; border-color: transparent; font-weight: 600; }
+      button.live { background: #f85149; color: white; border-color: transparent; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 16px;
+        min-height: 240px;
+      }
+      pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-size: 13px;
+      }
+      .badge { color: var(--ok); font-size: 13px; }
+      #log { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
+      .bubble { padding: 8px 10px; border-radius: 10px; font-size: 14px; }
+      .bubble.user { background: #21262d; }
+      .bubble.assistant { background: #1b2838; }
+      #suggestions { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+      #suggestions button { text-align: left; }
+      #live {
+        min-height: 28px;
+        margin: 0 0 12px;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px dashed var(--line);
+        color: var(--text);
+      }
+      #live .interim { color: var(--muted); }
+      @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>OTOVOICE</h1>
+      <p>Tap Start once. After that it keeps talking with you — listen, reply, listen again — until you tap Stop or say goodbye.</p>
+      <div class="badge" id="engine">checking engine…</div>
+      <div class="row">
+        <input id="text" placeholder="Book a ride from Marina to the airport" />
+        <button class="primary" id="send">Send text</button>
+        <button id="mic">Start</button>
+        <button id="reset">New conversation</button>
+      </div>
+      <p class="badge" id="memory">No conversation memory yet.</p>
+      <div class="grid">
+        <section class="card">
+          <h2>Conversation</h2>
+          <p id="live">Tap Start once. Then just speak.</p>
+          <div id="log"></div>
+          <div id="suggestions"></div>
+          <p id="reply">Waiting for a turn…</p>
+          <audio id="player" controls hidden></audio>
+        </section>
+        <section class="card">
+          <h2>Structured result</h2>
+          <pre id="json">{}</pre>
+        </section>
+      </div>
+    </main>
+    <script>
+      const textEl = document.querySelector("#text");
+      const replyEl = document.querySelector("#reply");
+      const jsonEl = document.querySelector("#json");
+      const player = document.querySelector("#player");
+      const logEl = document.querySelector("#log");
+      const memoryEl = document.querySelector("#memory");
+      const suggestionsEl = document.querySelector("#suggestions");
+      const liveEl = document.querySelector("#live");
+      const mic = document.querySelector("#mic");
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const STOP_SPEECH = /\b(stop talking|stop listening|that's all|thats all|goodbye|good bye|bye bye|hang up|end conversation)\b/i;
+
+      let sessionId = localStorage.getItem("otovoice.sessionId") || "";
+      let deviceContext = {};
+      let hasServerStt = false;
+      let sessionActive = false;
+      let turnBusy = false;
+      let speaking = false;
+      let ignoreUntil = 0;
+      let commitTimer = null;
+      let liveFinal = "";
+      let liveInterim = "";
+      let lastAssistant = "";
+      let hearing = false;
+      let recognition = null;
+      let micStream = null;
+      let audioCtx = null;
+      let pcmListen = null;
+
+      function delay(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+      }
+
+      function acceptingAudio() {
+        return sessionActive && !turnBusy && !speaking && Date.now() >= ignoreUntil;
+      }
+
+      function isStopPhrase(text) {
+        const t = text.trim();
+        if (!t) return false;
+        if (/^(stop|goodbye|bye)$/i.test(t)) return true;
+        return STOP_SPEECH.test(t);
+      }
+
+      function looksLikeEcho(text) {
+        const t = text.trim().toLowerCase();
+        const reply = lastAssistant.trim().toLowerCase();
+        if (!t || !reply) return false;
+        if (t === reply) return true;
+        if (reply.length > 12 && t.includes(reply.slice(0, Math.min(48, reply.length)))) return true;
+        return false;
+      }
+
+      function renderSuggestions(items = []) {
+        suggestionsEl.innerHTML = "";
+        for (const item of items) {
+          const button = document.createElement("button");
+          button.textContent = `${item.index}. ${item.label}`;
+          button.onclick = () => sendTurn({ sessionId: sessionId || undefined, text: String(item.index), context: deviceContext });
+          suggestionsEl.appendChild(button);
+        }
+      }
+
+      function renderMessages(messages = [], summary = "", suggestions = []) {
+        logEl.innerHTML = "";
+        for (const message of messages) {
+          const bubble = document.createElement("div");
+          bubble.className = `bubble ${message.role}`;
+          bubble.textContent = `${message.role === "user" ? "You" : "OTOVOICE"}: ${message.content}`;
+          logEl.appendChild(bubble);
+        }
+        memoryEl.textContent = summary || "No conversation memory yet.";
+        renderSuggestions(suggestions);
+        const last = [...messages].reverse().find((message) => message.role === "assistant");
+        if (last) replyEl.textContent = last.content;
+      }
+
+      function idleLiveMessage() {
+        if (speaking) return "OTOVOICE is speaking…";
+        if (turnBusy) return "Thinking…";
+        if (sessionActive && hearing) return "Hearing you…";
+        if (sessionActive) return "Listening… speak now.";
+        return "Tap Start once. Then just speak.";
+      }
+
+      function showLive() {
+        const finalText = liveFinal.trim();
+        const interimText = liveInterim.trim();
+        liveEl.innerHTML = "";
+        if (!finalText && !interimText) {
+          liveEl.textContent = idleLiveMessage();
+          return;
+        }
+        if (finalText) liveEl.append(finalText + (interimText ? " " : ""));
+        if (interimText) {
+          const span = document.createElement("span");
+          span.className = "interim";
+          span.textContent = interimText;
+          liveEl.appendChild(span);
+        }
+        textEl.value = [finalText, interimText].filter(Boolean).join(" ");
+      }
+
+      async function boot() {
+        const health = await fetch("/health").then((r) => r.json());
+        hasServerStt = Boolean(health.capabilities?.stt);
+        document.querySelector("#engine").textContent = `Engine: ${health.engine}${hasServerStt ? " · live mic STT" : ""}`;
+        if (navigator.geolocation) {
+          navigator.geolocation.getCurrentPosition((pos) => {
+            deviceContext = { currentLat: pos.coords.latitude, currentLng: pos.coords.longitude };
+          }, () => {});
+        }
+        if (!sessionId) return;
+        const res = await fetch(`/v1/conversation/${sessionId}`);
+        if (!res.ok) {
+          localStorage.removeItem("otovoice.sessionId");
+          sessionId = "";
+          return;
+        }
+        const session = await res.json();
+        renderMessages(session.messages, session.summary, session.locationSuggestions);
+        jsonEl.textContent = JSON.stringify(session, null, 2);
+      }
+
+      function speakBrowser(text) {
+        return new Promise((resolve) => {
+          if (!text || !window.speechSynthesis) {
+            resolve();
+            return;
+          }
+          window.speechSynthesis.cancel();
+          const utterance = new SpeechSynthesisUtterance(text);
+          utterance.onboundary = (event) => {
+            if (event.name !== "word") return;
+            const end = event.charIndex + (event.charLength || 0);
+            replyEl.textContent = text.slice(0, end) || text;
+          };
+          let settled = false;
+          const done = () => {
+            if (settled) return;
+            settled = true;
+            clearInterval(pump);
+            clearTimeout(watchdog);
+            replyEl.textContent = text;
+            resolve();
+          };
+          utterance.onend = done;
+          utterance.onerror = done;
+          const words = text.trim().split(/\s+/).length;
+          const watchdog = setTimeout(done, Math.min(20000, 1200 + words * 420));
+          const pump = setInterval(() => {
+            try { window.speechSynthesis.resume(); } catch (_) {}
+          }, 200);
+          window.speechSynthesis.speak(utterance);
+        });
+      }
+
+      function playFile(audioBase64, audioMime) {
+        return new Promise((resolve) => {
+          const done = () => {
+            player.onended = null;
+            player.onerror = null;
+            resolve();
+          };
+          player.onended = done;
+          player.onerror = done;
+          player.src = `data:${audioMime};base64,${audioBase64}`;
+          player.hidden = false;
+          player.play().catch(done);
+        });
+      }
+
+      function resetUtterance() {
+        liveFinal = "";
+        liveInterim = "";
+        hearing = false;
+        pcmListen?.reset();
+        showLive();
+      }
+
+      async function playReply(text, audioBase64, audioMime) {
+        lastAssistant = text || "";
+        speaking = true;
+        ignoreUntil = Date.now() + 60000;
+        resetUtterance();
+        showLive();
+        try {
+          if (audioBase64) await playFile(audioBase64, audioMime);
+          else await speakBrowser(text);
+        } finally {
+          speaking = false;
+          ignoreUntil = Date.now() + 600;
+          resetUtterance();
+          if (audioCtx?.state === "suspended") audioCtx.resume().catch(() => {});
+          keepBrowserListen();
+          showLive();
+        }
+      }
+
+      async function sendTurn(payload) {
+        turnBusy = true;
+        ignoreUntil = Date.now() + 60000;
+        resetUtterance();
+        showLive();
+        try {
+          const res = await fetch("/v1/conversation/turn", {
+            method: "POST",
+            body: payload instanceof FormData ? payload : JSON.stringify(payload),
+            headers: payload instanceof FormData ? {} : { "Content-Type": "application/json" },
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "Turn failed");
+          sessionId = data.sessionId;
+          localStorage.setItem("otovoice.sessionId", sessionId);
+          renderMessages(data.messages, data.memory?.summary, data.locationSuggestions);
+          jsonEl.textContent = JSON.stringify(data, null, 2);
+          turnBusy = false;
+          await playReply(data.reply.text, data.reply.audioBase64, data.reply.audioMime);
+          return data;
+        } catch (error) {
+          replyEl.textContent = error.message || "Turn failed";
+          ignoreUntil = Date.now() + 400;
+          keepBrowserListen();
+          return null;
+        } finally {
+          turnBusy = false;
+          showLive();
+        }
+      }
+
+      function scheduleCommit() {
+        clearTimeout(commitTimer);
+        commitTimer = setTimeout(() => {
+          void commitLiveTurn();
+        }, 1200);
+      }
+
+      async function commitLiveTurn(forcedText) {
+        const text = (forcedText || liveFinal).trim();
+        if (!text || turnBusy || speaking || !sessionActive) return;
+        if (looksLikeEcho(text)) {
+          resetUtterance();
+          return;
+        }
+        liveFinal = "";
+        liveInterim = "";
+        textEl.value = "";
+        const stopNow = isStopPhrase(text);
+        await sendTurn({ sessionId: sessionId || undefined, text, context: deviceContext });
+        if (stopNow) await endConversation();
+      }
+
+      function keepBrowserListen() {
+        if (!sessionActive || !SpeechRecognition) return;
+        if (!recognition) {
+          recognition = new SpeechRecognition();
+          recognition.lang = "en-US";
+          recognition.continuous = true;
+          recognition.interimResults = true;
+          recognition.maxAlternatives = 1;
+          recognition.onresult = (event) => {
+            if (!acceptingAudio()) return;
+            liveInterim = "";
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+              const piece = event.results[i][0]?.transcript || "";
+              if (event.results[i].isFinal) {
+                liveFinal = `${liveFinal} ${piece}`.trim();
+                liveInterim = "";
+                scheduleCommit();
+              } else {
+                liveInterim += piece;
+                hearing = true;
+              }
+            }
+            showLive();
+          };
+          recognition.onerror = (event) => {
+            if (event.error === "no-speech" || event.error === "aborted") return;
+            if (event.error === "not-allowed") {
+              liveEl.textContent = "Microphone permission is blocked.";
+            }
+          };
+          recognition.onend = () => {
+            if (!sessionActive) return;
+            try { recognition.start(); } catch (_) {}
+          };
+        }
+        try { recognition.start(); } catch (_) {}
+      }
+
+      function floatToWav(samples, sampleRate) {
+        const buffer = new ArrayBuffer(44 + samples.length * 2);
+        const view = new DataView(buffer);
+        const write = (offset, str) => {
+          for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+        };
+        write(0, "RIFF");
+        view.setUint32(4, 36 + samples.length * 2, true);
+        write(8, "WAVE");
+        write(12, "fmt ");
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, 1, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * 2, true);
+        view.setUint16(32, 2, true);
+        view.setUint16(34, 16, true);
+        write(36, "data");
+        view.setUint32(40, samples.length * 2, true);
+        let offset = 44;
+        for (let i = 0; i < samples.length; i++) {
+          const s = Math.max(-1, Math.min(1, samples[i]));
+          view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+          offset += 2;
+        }
+        return new Blob([buffer], { type: "audio/wav" });
+      }
+
+      function startPcmListen() {
+        const source = audioCtx.createMediaStreamSource(micStream);
+        const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+        const mute = audioCtx.createGain();
+        mute.gain.value = 0;
+        const chunks = [];
+        let transcribing = false;
+        let voiced = false;
+        let lastVoice = Date.now();
+        source.connect(processor);
+        processor.connect(mute);
+        mute.connect(audioCtx.destination);
+
+        processor.onaudioprocess = (event) => {
+          if (!acceptingAudio()) return;
+          const input = event.inputBuffer.getChannelData(0);
+          let energy = 0;
+          const copy = new Float32Array(input.length);
+          for (let i = 0; i < input.length; i++) {
+            copy[i] = input[i];
+            energy += input[i] * input[i];
+          }
+          const rms = Math.sqrt(energy / input.length);
+          if (rms > 0.012) {
+            voiced = true;
+            hearing = true;
+            lastVoice = Date.now();
+            chunks.push(copy);
+            if (!liveFinal && !liveInterim) showLive();
+          } else if (voiced) {
+            chunks.push(copy);
+          }
+        };
+
+        const tick = setInterval(async () => {
+          if (!acceptingAudio() || transcribing || !voiced || !chunks.length) return;
+          if (Date.now() - lastVoice < 1100) return;
+          const sampleCount = chunks.reduce((n, part) => n + part.length, 0);
+          if (sampleCount < audioCtx.sampleRate * 0.45) {
+            chunks.length = 0;
+            voiced = false;
+            hearing = false;
+            showLive();
+            return;
+          }
+          transcribing = true;
+          const merged = new Float32Array(sampleCount);
+          let offset = 0;
+          for (const part of chunks) {
+            merged.set(part, offset);
+            offset += part.length;
+          }
+          chunks.length = 0;
+          voiced = false;
+          hearing = false;
+          try {
+            const browserText = liveFinal.trim();
+            if (browserText) {
+              await commitLiveTurn(browserText);
+              return;
+            }
+            const form = new FormData();
+            form.append("audio", floatToWav(merged, audioCtx.sampleRate), "speech.wav");
+            const res = await fetch("/v1/speech/transcribe", { method: "POST", body: form });
+            const data = await res.json();
+            const text = res.ok ? String(data.text || "").trim() : "";
+            if (text) await commitLiveTurn(text);
+            else showLive();
+          } catch (_) {
+            showLive();
+          } finally {
+            transcribing = false;
+          }
+        }, 250);
+
+        pcmListen = {
+          reset() {
+            chunks.length = 0;
+            voiced = false;
+            lastVoice = Date.now();
+          },
+          stop() {
+            clearInterval(tick);
+            try { processor.disconnect(); source.disconnect(); mute.disconnect(); } catch (_) {}
+          },
+        };
+      }
+
+      function setMicUi() {
+        if (sessionActive) {
+          mic.classList.add("live");
+          mic.textContent = "Stop";
+        } else {
+          mic.classList.remove("live");
+          mic.textContent = "Start";
+        }
+      }
+
+      async function startConversation() {
+        sessionActive = true;
+        ignoreUntil = 0;
+        resetUtterance();
+        setMicUi();
+        showLive();
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            channelCount: 1,
+          },
+        });
+        audioCtx = new AudioContext();
+        if (audioCtx.state === "suspended") await audioCtx.resume();
+        if (hasServerStt) startPcmListen();
+        keepBrowserListen();
+        liveEl.textContent = "Listening… speak now.";
+      }
+
+      async function endConversation() {
+        sessionActive = false;
+        speaking = false;
+        turnBusy = false;
+        ignoreUntil = Date.now();
+        clearTimeout(commitTimer);
+        window.speechSynthesis?.cancel();
+        try { player.pause(); } catch (_) {}
+        if (recognition) {
+          const rec = recognition;
+          recognition = null;
+          rec.onend = null;
+          try { rec.stop(); } catch (_) {}
+        }
+        pcmListen?.stop();
+        pcmListen = null;
+        if (audioCtx) {
+          audioCtx.close().catch(() => {});
+          audioCtx = null;
+        }
+        if (micStream) {
+          micStream.getTracks().forEach((track) => track.stop());
+          micStream = null;
+        }
+        resetUtterance();
+        setMicUi();
+        showLive();
+      }
+
+      document.querySelector("#reset").onclick = async () => {
+        await endConversation();
+        if (sessionId) {
+          await fetch(`/v1/conversation/${sessionId}`, { method: "DELETE" }).catch(() => {});
+        }
+        sessionId = "";
+        localStorage.removeItem("otovoice.sessionId");
+        renderMessages([], "", []);
+        jsonEl.textContent = "{}";
+        replyEl.textContent = "New conversation started.";
+      };
+
+      document.querySelector("#send").onclick = async () => {
+        const text = textEl.value.trim();
+        if (!text) return;
+        await sendTurn({ sessionId: sessionId || undefined, text, context: deviceContext });
+        textEl.value = "";
+      };
+
+      mic.onclick = async () => {
+        if (sessionActive) {
+          await endConversation();
+          return;
+        }
+        try {
+          await startConversation();
+        } catch (error) {
+          await endConversation();
+          liveEl.textContent = error.message || "Microphone is unavailable.";
+        }
+      };
+
+      boot();
+    </script>
+  </body>
+</html>
