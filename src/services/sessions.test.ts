@@ -40,6 +40,7 @@ describe("conversation memory", () => {
       pendingActions: [],
       awaitingResults: [],
       pendingLocation: null,
+      pendingPickupConfirm: false,
       summary: "",
     };
     session.summary = buildSummary(session);

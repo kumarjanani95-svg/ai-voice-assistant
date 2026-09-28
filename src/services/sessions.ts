@@ -21,7 +21,7 @@ export function emptySlots(): Slots {
   };
 }
 
-export function buildSummary(session: Pick<ConversationSession, "slots" | "lastIntent" | "messages" | "pendingLocation">): string {
+export function buildSummary(session: Pick<ConversationSession, "slots" | "lastIntent" | "messages" | "pendingLocation" | "pendingPickupConfirm">): string {
   const placeLabel = (place: Place | null) => {
     if (!place) return null;
     const name = place.formatted || place.raw;
@@ -34,6 +34,7 @@ export function buildSummary(session: Pick<ConversationSession, "slots" | "lastI
     session.pendingLocation
       ? `Waiting for exact ${session.pendingLocation.role} in ${session.pendingLocation.query}`
       : null,
+    session.pendingPickupConfirm ? "Waiting for rider to confirm or change pickup" : null,
     session.slots.when ? `When: ${session.slots.when}` : null,
     session.slots.vehicleType ? `Vehicle: ${session.slots.vehicleType}` : null,
     session.slots.bookingRef ? `Booking ref ${session.slots.bookingRef}` : null,
@@ -78,6 +79,7 @@ export function loadSessionFromDisk(id: string, dir = config.sessionDir): Conver
       pendingActions: raw.pendingActions ?? [],
       awaitingResults: raw.awaitingResults ?? [],
       pendingLocation: raw.pendingLocation ?? null,
+      pendingPickupConfirm: raw.pendingPickupConfirm ?? false,
       summary: raw.summary ?? buildSummary(raw),
       lastIntent: raw.lastIntent ?? null,
     };
@@ -104,6 +106,7 @@ export function createSession(id?: string): ConversationSession {
     pendingActions: [],
     awaitingResults: [],
     pendingLocation: null,
+    pendingPickupConfirm: false,
     summary: "New conversation. No trip details yet.",
   };
   store.set(session.id, session);

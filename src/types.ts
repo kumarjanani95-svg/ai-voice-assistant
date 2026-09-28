@@ -102,6 +102,7 @@ export type ConversationSession = {
   pendingActions: ProposedAction[];
   awaitingResults: ProposedAction[];
   pendingLocation: PendingLocation | null;
+  pendingPickupConfirm: boolean;
   summary: string;
 };
 
@@ -123,6 +124,7 @@ export type StructuredTurn = {
   messages: ChatMessage[];
   locationSuggestions: LocationSuggestion[];
   pendingLocation: PendingLocation | null;
+  pendingPickupConfirm: boolean;
   uiHint: {
     screen: "chat" | "confirm" | "trip_preview" | "status" | "location_pick";
     promptUser: boolean;

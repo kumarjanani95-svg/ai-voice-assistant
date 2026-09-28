@@ -71,6 +71,7 @@ conversationRouter.get("/v1/conversation/:sessionId", (req, res) => {
     summary: session.summary,
     pendingLocation: session.pendingLocation,
     locationSuggestions: session.pendingLocation?.suggestions ?? [],
+    pendingPickupConfirm: session.pendingPickupConfirm,
     pendingActions: session.pendingActions,
     messages: session.messages,
   });

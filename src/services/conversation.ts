@@ -13,8 +13,11 @@ import { fallbackExtract } from "./fallback.js";
 import { extractTurn } from "./llm.js";
 import {
   applyLocationChoice,
+  classifyPickupConfirmReply,
+  formatPickupConfirmReply,
   formatResolvedReply,
   formatSuggestionReply,
+  namedNewPickup,
   needsCoordinates,
   resolvePlace,
 } from "./location.js";
@@ -40,6 +43,52 @@ function applyResolvedPlace(
 ): void {
   session.slots[role] = mergePlace(session.slots[role], place);
   if (session.pendingLocation?.role === role) session.pendingLocation = null;
+  if (role === "pickup") session.pendingPickupConfirm = true;
+}
+
+function pickupLabel(place: Place | null): string {
+  return place?.formatted || place?.raw || "that pickup";
+}
+
+function applyPickupConfirmation(
+  session: ReturnType<typeof getOrCreateSession>,
+  transcript: string,
+  extracted: LlmTurn,
+  previousPickup: Place | null,
+): { reply: string | null; skipLocation: boolean } {
+  if (!session.pendingPickupConfirm) return { reply: null, skipLocation: false };
+
+  if (namedNewPickup(previousPickup, extracted.slotUpdates.pickup)) {
+    session.slots.pickup = {
+      raw: extracted.slotUpdates.pickup?.raw ?? extracted.slotUpdates.pickup?.formatted ?? transcript,
+      formatted: extracted.slotUpdates.pickup?.formatted ?? null,
+      lat: extracted.slotUpdates.pickup?.lat ?? null,
+      lng: extracted.slotUpdates.pickup?.lng ?? null,
+    };
+    session.pendingPickupConfirm = false;
+    session.pendingLocation = null;
+    return { reply: null, skipLocation: false };
+  }
+
+  const decision = classifyPickupConfirmReply(transcript, extracted.intentName);
+  if (decision === "proceed") {
+    session.pendingPickupConfirm = false;
+    extracted.intentName = "set_pickup";
+    const next = session.slots.destination
+      ? `Okay, proceeding with pickup at ${pickupLabel(session.slots.pickup)}.`
+      : `Okay, proceeding with pickup at ${pickupLabel(session.slots.pickup)}. Where are you going?`;
+    return { reply: next, skipLocation: !needsCoordinates(session.slots.destination) };
+  }
+  if (decision === "change") {
+    session.slots.pickup = null;
+    session.pendingPickupConfirm = false;
+    session.pendingLocation = session.pendingLocation?.role === "pickup" ? null : session.pendingLocation;
+    extracted.intentName = "update_location";
+    extracted.slotUpdates.pickup = { raw: null, formatted: null, lat: null, lng: null };
+    return { reply: "Okay, where should I pick you up instead?", skipLocation: true };
+  }
+
+  return { reply: formatPickupConfirmReply(session.slots.pickup!), skipLocation: true };
 }
 
 async function collectCoordinates(
@@ -53,7 +102,34 @@ async function collectCoordinates(
     if (chosen) {
       const role = session.pendingLocation.role;
       applyResolvedPlace(session, role, chosen);
-      lastReply = formatResolvedReply(role, session.slots[role]!, role === "pickup" && !session.slots.destination);
+      lastReply =
+        role === "pickup"
+          ? formatPickupConfirmReply(session.slots[role]!)
+          : formatResolvedReply(role, session.slots[role]!, false);
+      if (role === "pickup") {
+        return { reply: lastReply, missingExact: [] };
+      }
+    } else if (transcript.trim().length >= 3) {
+      const role = session.pendingLocation.role;
+      const resolution = await resolvePlace(transcript, role, context);
+      if (resolution.status === "resolved") {
+        applyResolvedPlace(session, role, resolution.place);
+        if (role === "pickup") {
+          return { reply: formatPickupConfirmReply(session.slots.pickup!), missingExact: [] };
+        }
+        lastReply = formatResolvedReply(role, session.slots[role]!, false);
+        session.pendingLocation = null;
+      } else if (resolution.status === "clarify" && resolution.suggestions.length) {
+        session.pendingLocation = {
+          role,
+          query: transcript.trim(),
+          suggestions: resolution.suggestions,
+        };
+        return {
+          reply: formatSuggestionReply(role, transcript.trim(), resolution.suggestions),
+          missingExact: [`${role}_exact`],
+        };
+      }
     }
   }
 
@@ -69,8 +145,13 @@ async function collectCoordinates(
     const resolution = await resolvePlace(queryOf(place), role, context);
     if (resolution.status === "resolved") {
       applyResolvedPlace(session, role, resolution.place);
-      const askNext = role === "pickup" && !session.slots.destination;
-      lastReply = formatResolvedReply(role, session.slots[role]!, askNext);
+      if (role === "pickup") {
+        return {
+          reply: formatPickupConfirmReply(session.slots.pickup!),
+          missingExact: [],
+        };
+      }
+      lastReply = formatResolvedReply(role, session.slots[role]!, false);
       continue;
     }
     if (resolution.status === "clarify" && resolution.suggestions.length) {
@@ -122,6 +203,7 @@ export async function handleTurn(input: {
           slots: session.slots,
           lastIntent: session.lastIntent,
           pendingLocation: session.pendingLocation,
+          pendingPickupConfirm: session.pendingPickupConfirm,
         });
   } catch (error) {
     console.warn("LLM provider failed, using local fallback:", error);
@@ -129,15 +211,22 @@ export async function handleTurn(input: {
       slots: session.slots,
       lastIntent: session.lastIntent,
       pendingLocation: session.pendingLocation,
+      pendingPickupConfirm: session.pendingPickupConfirm,
     });
     engine = "fallback";
   }
 
   session.messages.push({ role: "user", content: transcript });
+  const previousPickup = session.slots.pickup;
   session.slots = mergeSlots(session.slots, extracted.slotUpdates);
-  session.lastIntent = extracted.intentName;
 
-  const location = await collectCoordinates(session, transcript, input.context);
+  const confirmation = applyPickupConfirmation(session, transcript, extracted, previousPickup);
+  session.lastIntent = extracted.intentName;
+  let location = { reply: confirmation.reply, missingExact: [] as string[] };
+  if (!confirmation.skipLocation) {
+    location = await collectCoordinates(session, transcript, input.context);
+    if (confirmation.reply && !location.reply) location.reply = confirmation.reply;
+  }
   if (location.reply) extracted.replyText = location.reply;
 
   const proposedActions = deriveActions({
@@ -145,6 +234,7 @@ export async function handleTurn(input: {
     slots: session.slots,
     suggested: extracted.suggestedActions,
     pending: session.pendingActions,
+    pendingPickupConfirm: session.pendingPickupConfirm,
   });
   setPendingActions(session, proposedActions);
   session.awaitingResults = proposedActions;
@@ -158,11 +248,14 @@ export async function handleTurn(input: {
           !session.slots.pickup && ["request_ride", "estimate_trip"].includes(extracted.intentName)
             ? "pickup"
             : null,
-          !session.slots.destination && ["request_ride", "estimate_trip"].includes(extracted.intentName)
+          !session.slots.destination &&
+          ["request_ride", "estimate_trip"].includes(extracted.intentName) &&
+          !session.pendingPickupConfirm
             ? "destination"
             : null,
         ].filter(Boolean)),
     ...location.missingExact,
+    ...(session.pendingPickupConfirm ? ["pickup_confirm"] : []),
   ] as string[];
 
   let audioBase64: string | null = null;
@@ -196,7 +289,8 @@ export async function handleTurn(input: {
     messages: session.messages,
     locationSuggestions: session.pendingLocation?.suggestions ?? [],
     pendingLocation: session.pendingLocation,
-    uiHint: uiHintFor(extracted.intentName, proposedActions, session.pendingLocation),
+    pendingPickupConfirm: session.pendingPickupConfirm,
+    uiHint: uiHintFor(extracted.intentName, proposedActions, session.pendingLocation, session.pendingPickupConfirm),
     engine,
   };
 }
@@ -229,6 +323,7 @@ export function reportActionResult(sessionId: string, result: ActionResult): {
   slots: StructuredTurn["slots"];
   applied: boolean;
   pendingLocation: PendingLocation | null;
+  pendingPickupConfirm: boolean;
 } {
   const session = getSession(sessionId);
   if (!session) {
@@ -254,6 +349,7 @@ export function reportActionResult(sessionId: string, result: ActionResult): {
     } else {
       session.slots = applyActionResult(session.slots, action, result.data);
       if (session.pendingLocation?.role === role) session.pendingLocation = null;
+      if (role === "pickup" && result.ok) session.pendingPickupConfirm = true;
     }
   }
   session.awaitingResults = session.awaitingResults.filter((item) => item.id !== result.actionId);
@@ -265,5 +361,6 @@ export function reportActionResult(sessionId: string, result: ActionResult): {
     slots: session.slots,
     applied: result.ok,
     pendingLocation: session.pendingLocation,
+    pendingPickupConfirm: session.pendingPickupConfirm,
   };
 }

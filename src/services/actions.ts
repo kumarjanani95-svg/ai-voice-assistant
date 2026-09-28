@@ -24,12 +24,20 @@ export function deriveActions(input: {
   slots: Slots;
   suggested: ActionName[];
   pending: ProposedAction[];
+  pendingPickupConfirm?: boolean;
 }): ProposedAction[] {
-  const { intentName, slots, suggested, pending } = input;
+  const { intentName, slots, suggested, pending, pendingPickupConfirm } = input;
   const actions: ProposedAction[] = [];
   const wants = new Set<ActionName>(suggested);
 
   if (intentName === "deny") return [];
+  if (pendingPickupConfirm) {
+    if (slots.pickup && !placeResolved(slots.pickup)) wants.add("geocode");
+    if (wants.has("geocode") && slots.pickup && !placeResolved(slots.pickup)) {
+      actions.push(buildAction("geocode", { ...placeBody(slots.pickup), role: "pickup" }));
+    }
+    return actions;
+  }
 
   if (intentName === "confirm") {
     return pending.map((action) => ({ ...action, confirmed: true }));
@@ -124,12 +132,16 @@ export function uiHintFor(
   intentName: IntentName,
   actions: ProposedAction[],
   pendingLocation?: PendingLocation | null,
+  pendingPickupConfirm?: boolean,
 ): {
   screen: "chat" | "confirm" | "trip_preview" | "status" | "location_pick";
   promptUser: boolean;
 } {
   if (pendingLocation?.suggestions.length) {
     return { screen: "location_pick", promptUser: true };
+  }
+  if (pendingPickupConfirm) {
+    return { screen: "confirm", promptUser: true };
   }
   if (actions.some((action) => action.requiresApproval && !action.confirmed)) {
     return { screen: "confirm", promptUser: true };

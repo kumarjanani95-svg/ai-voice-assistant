@@ -7,6 +7,7 @@ export type FallbackMemory = {
   slots?: Slots;
   lastIntent?: IntentName | null;
   pendingLocation?: PendingLocation | null;
+  pendingPickupConfirm?: boolean;
 };
 
 function place(raw: string, context?: DeviceContext, here = false): Place {
@@ -73,6 +74,25 @@ export function fallbackExtract(
     !destinationRaw &&
     text.split(/\s+/).length <= 8 &&
     !/\b(yes|yeah|yep|no|ok|okay|book|ride|taxi|cab|fare|price|status|cancel|help|hello|hi)\b/.test(lower);
+
+  if (memory.pendingPickupConfirm) {
+    if (/\b(change|different|another pickup|new pickup|somewhere else|not (this|that)|wrong)\b/.test(lower) || /^(no|nope|nah)$/i.test(lower)) {
+      if (looksLikeBarePlace) slots.pickup = place(text);
+      return reply(
+        looksLikeBarePlace ? "set_pickup" : "update_location",
+        0.9,
+        slots,
+        looksLikeBarePlace ? "Okay, I will use that pickup instead." : "Okay, where should I pick you up instead?",
+      );
+    }
+    if (/\b(yes|yeah|yep|ok|okay|sure|proceed|go ahead|confirm|keep it)\b/.test(lower)) {
+      return reply("confirm", 0.9, slots, "Okay, proceeding with this pickup.");
+    }
+    if (looksLikeBarePlace) {
+      slots.pickup = place(text);
+      return reply("set_pickup", 0.85, slots, "Okay, I will use that pickup instead.");
+    }
+  }
 
   if (memory.pendingLocation && parseSuggestionChoice(text) != null) {
     return reply("choose_location", 0.95, slots, "Okay, I will use that exact location.");

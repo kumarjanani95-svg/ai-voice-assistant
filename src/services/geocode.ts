@@ -67,9 +67,11 @@ export type GeocodeHit = {
 
 type NominatimItem = {
   display_name?: string;
+  name?: string;
   lat?: string;
   lon?: string;
   class?: string;
+  category?: string;
   type?: string;
   addresstype?: string;
   importance?: number;
@@ -119,9 +121,10 @@ function toHit(item: NominatimItem): GeocodeHit | null {
   const bbox = item.boundingbox?.length === 4
     ? (item.boundingbox.map(Number) as [number, number, number, number])
     : undefined;
+  const className = item.class ?? item.category;
   const kind = isAreaHit({
     type: item.type,
-    className: item.class,
+    className,
     addresstype: item.addresstype,
     bbox,
   })
@@ -131,23 +134,20 @@ function toHit(item: NominatimItem): GeocodeHit | null {
     formatted: item.display_name,
     lat,
     lng,
-    type: `${item.class ?? "place"}:${item.type ?? item.addresstype ?? "unknown"}`,
+    type: `${className ?? "place"}:${item.type ?? item.addresstype ?? "unknown"}`,
     kind,
     importance: item.importance ?? 0,
     bbox,
   };
 }
 
-export async function searchPlaces(
+async function searchNominatim(
   query: string,
-  options: { viewbox?: string; bounded?: boolean; limit?: number } = {},
+  options: { viewbox?: string; bounded?: boolean; limit?: number; retry?: number } = {},
 ): Promise<GeocodeHit[]> {
-  const trimmed = query.trim();
-  if (!trimmed) return [];
-
   await throttle();
   const url = new URL(`${config.geocoder.baseUrl}/search`);
-  url.searchParams.set("q", trimmed);
+  url.searchParams.set("q", query);
   url.searchParams.set("format", "jsonv2");
   url.searchParams.set("addressdetails", "1");
   url.searchParams.set("limit", String(options.limit ?? 8));
@@ -166,11 +166,100 @@ export async function searchPlaces(
       "User-Agent": config.geocoder.userAgent,
     },
   });
+  if (response.status === 429 && (options.retry ?? 0) < 1) {
+    await sleep(1200);
+    return searchNominatim(query, { ...options, retry: (options.retry ?? 0) + 1 });
+  }
   if (!response.ok) {
     throw new Error(`Geocoder HTTP ${response.status}`);
   }
   const rows = (await response.json()) as NominatimItem[];
   return rows.map(toHit).filter((hit): hit is GeocodeHit => Boolean(hit));
+}
+
+async function searchPhoton(query: string, limit = 8): Promise<GeocodeHit[]> {
+  const url = new URL("https://photon.komoot.io/api/");
+  url.searchParams.set("q", query);
+  url.searchParams.set("limit", String(limit));
+  url.searchParams.set("lang", "en");
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": config.geocoder.userAgent,
+    },
+  });
+  if (!response.ok) return [];
+  const payload = (await response.json()) as {
+    features?: Array<{
+      geometry?: { coordinates?: number[] };
+      properties?: {
+        name?: string;
+        street?: string;
+        city?: string;
+        state?: string;
+        country?: string;
+        osm_key?: string;
+        osm_value?: string;
+        extent?: number[];
+      };
+    }>;
+  };
+  const hits: GeocodeHit[] = [];
+  for (const feature of payload.features ?? []) {
+    const lng = Number(feature.geometry?.coordinates?.[0]);
+    const lat = Number(feature.geometry?.coordinates?.[1]);
+    const props = feature.properties ?? {};
+    const formatted = [props.name, props.street, props.city, props.state, props.country]
+      .filter(Boolean)
+      .join(", ");
+    if (!formatted || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    const extent = props.extent;
+    const bbox =
+      extent?.length === 4
+        ? ([extent[1], extent[3], extent[0], extent[2]] as [number, number, number, number])
+        : undefined;
+    hits.push({
+      formatted,
+      lat,
+      lng,
+      type: `${props.osm_key ?? "place"}:${props.osm_value ?? "unknown"}`,
+      kind: isAreaHit({ type: props.osm_value, className: props.osm_key, bbox }) ? "area" : "exact",
+      importance: 0,
+      bbox,
+    });
+  }
+  return hits;
+}
+
+export async function searchPlaces(
+  query: string,
+  options: { viewbox?: string; bounded?: boolean; limit?: number } = {},
+): Promise<GeocodeHit[]> {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+
+  try {
+    const hits = await searchNominatim(trimmed, options);
+    if (hits.length) return hits;
+  } catch (error) {
+    console.warn("Nominatim search failed:", error);
+  }
+
+  if (options.viewbox) {
+    try {
+      const globalHits = await searchNominatim(trimmed, { limit: options.limit });
+      if (globalHits.length) return globalHits;
+    } catch (error) {
+      console.warn("Nominatim global search failed:", error);
+    }
+  }
+
+  try {
+    return await searchPhoton(trimmed, options.limit ?? 8);
+  } catch (error) {
+    console.warn("Photon search failed:", error);
+    return [];
+  }
 }
 
 export function hitsToSuggestions(hits: GeocodeHit[], limit = 5): LocationSuggestion[] {

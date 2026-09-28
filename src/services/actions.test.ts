@@ -40,6 +40,20 @@ describe("deriveActions", () => {
     assert.equal(actions[0]?.confirmed, false);
   });
 
+  it("does not propose booking while pickup still needs confirmation", () => {
+    const slots = emptySlots();
+    slots.pickup = { raw: "home", formatted: "Home", lat: 25.2, lng: 55.27 };
+    slots.destination = { raw: "airport", formatted: "DXB", lat: 25.25, lng: 55.36 };
+    const actions = deriveActions({
+      intentName: "request_ride",
+      slots,
+      suggested: ["create_booking"],
+      pending: [],
+      pendingPickupConfirm: true,
+    });
+    assert.equal(actions.some((action) => action.name === "create_booking"), false);
+  });
+
   it("confirms a pending action without calculating a fare", () => {
     const pending = [buildAction("create_booking", { pickup: "A", destination: "B" })];
     const actions = deriveActions({

@@ -71,4 +71,33 @@ describe("fallbackExtract", () => {
     });
     assert.equal(result.intentName, "choose_location");
   });
+
+  it("confirms a pending pickup instead of booking", () => {
+    const result = fallbackExtract("yes, proceed", undefined, {
+      pendingPickupConfirm: true,
+      slots: {
+        pickup: { raw: "marina mall", formatted: "Dubai Marina Mall", lat: 25.07, lng: 55.14 },
+        destination: null,
+        when: null,
+        vehicleType: null,
+        bookingRef: null,
+      },
+    });
+    assert.equal(result.intentName, "confirm");
+  });
+
+  it("treats a new place as a pickup change while confirming", () => {
+    const result = fallbackExtract("Marina Walk", undefined, {
+      pendingPickupConfirm: true,
+      slots: {
+        pickup: { raw: "marina mall", formatted: "Dubai Marina Mall", lat: 25.07, lng: 55.14 },
+        destination: null,
+        when: null,
+        vehicleType: null,
+        bookingRef: null,
+      },
+    });
+    assert.equal(result.intentName, "set_pickup");
+    assert.match(String(result.slotUpdates.pickup?.raw), /marina walk/i);
+  });
 });

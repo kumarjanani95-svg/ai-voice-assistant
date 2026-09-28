@@ -32,7 +32,7 @@ function contextMessages(input: {
 
   return {
     system: `${SYSTEM_PROMPT}\n\n${JSON_INSTRUCTION}`,
-    state: `${contextBlock}\nConversation memory: ${input.session.summary}\nKnown slots: ${JSON.stringify(input.session.slots)}\nPending location: ${JSON.stringify(input.session.pendingLocation)}\nContinue this same conversation. Reuse known slots unless the rider changes them.`,
+    state: `${contextBlock}\nConversation memory: ${input.session.summary}\nKnown slots: ${JSON.stringify(input.session.slots)}\nPending location: ${JSON.stringify(input.session.pendingLocation)}\nPickup confirmation needed: ${input.session.pendingPickupConfirm ? "yes — ask proceed or change, do not ask destination yet" : "no"}\nContinue this same conversation. Reuse known slots unless the rider changes them.`,
     history: input.session.messages.slice(-config.memoryMessageLimit),
     userText: input.userText,
   };

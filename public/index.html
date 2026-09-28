@@ -156,8 +156,18 @@
         return false;
       }
 
-      function renderSuggestions(items = []) {
+      function renderSuggestions(items = [], confirmPickup = false) {
         suggestionsEl.innerHTML = "";
+        if (confirmPickup) {
+          const proceed = document.createElement("button");
+          proceed.textContent = "Proceed with this pickup";
+          proceed.onclick = () => sendTurn({ sessionId: sessionId || undefined, text: "proceed", context: deviceContext });
+          const change = document.createElement("button");
+          change.textContent = "Change pickup point";
+          change.onclick = () => sendTurn({ sessionId: sessionId || undefined, text: "change pickup", context: deviceContext });
+          suggestionsEl.appendChild(proceed);
+          suggestionsEl.appendChild(change);
+        }
         for (const item of items) {
           const button = document.createElement("button");
           button.textContent = `${item.index}. ${item.label}`;
@@ -166,7 +176,7 @@
         }
       }
 
-      function renderMessages(messages = [], summary = "", suggestions = []) {
+      function renderMessages(messages = [], summary = "", suggestions = [], confirmPickup = false) {
         logEl.innerHTML = "";
         for (const message of messages) {
           const bubble = document.createElement("div");
@@ -175,7 +185,7 @@
           logEl.appendChild(bubble);
         }
         memoryEl.textContent = summary || "No conversation memory yet.";
-        renderSuggestions(suggestions);
+        renderSuggestions(suggestions, confirmPickup);
         const last = [...messages].reverse().find((message) => message.role === "assistant");
         if (last) replyEl.textContent = last.content;
       }
@@ -223,7 +233,7 @@
           return;
         }
         const session = await res.json();
-        renderMessages(session.messages, session.summary, session.locationSuggestions);
+        renderMessages(session.messages, session.summary, session.locationSuggestions, session.pendingPickupConfirm);
         jsonEl.textContent = JSON.stringify(session, null, 2);
       }
 
@@ -317,7 +327,7 @@
           if (!res.ok) throw new Error(data.error || "Turn failed");
           sessionId = data.sessionId;
           localStorage.setItem("otovoice.sessionId", sessionId);
-          renderMessages(data.messages, data.memory?.summary, data.locationSuggestions);
+          renderMessages(data.messages, data.memory?.summary, data.locationSuggestions, data.pendingPickupConfirm);
           jsonEl.textContent = JSON.stringify(data, null, 2);
           turnBusy = false;
           await playReply(data.reply.text, data.reply.audioBase64, data.reply.audioMime);

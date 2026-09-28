@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { isAreaHit } from "./geocode.js";
-import { applyLocationChoice, parseSuggestionChoice } from "./location.js";
+import { applyLocationChoice, classifyPickupConfirmReply, formatPickupConfirmReply, parseSuggestionChoice, sanitizePlaceQuery } from "./location.js";
 
 describe("location classification", () => {
   it("treats a city or suburb as an area", () => {
@@ -54,5 +54,38 @@ describe("suggestion choice", () => {
     assert.equal(place?.formatted, "Dubai Marina Mall, Dubai");
     assert.equal(place?.lat, 25.076);
     assert.equal(place?.lng, 55.14);
+  });
+
+  it("matches a spoken place name to a suggestion", () => {
+    const place = applyLocationChoice(pending, "marina mall");
+    assert.equal(place?.formatted, "Dubai Marina Mall, Dubai");
+  });
+});
+
+describe("pickup confirmation", () => {
+  it("asks to proceed or change the pickup", () => {
+    const reply = formatPickupConfirmReply({
+      raw: "marina mall",
+      formatted: "Dubai Marina Mall",
+      lat: 25.07,
+      lng: 55.14,
+    });
+    assert.match(reply, /Dubai Marina Mall/);
+    assert.match(reply, /proceed/i);
+    assert.match(reply, /change/i);
+  });
+
+  it("classifies proceed and change answers", () => {
+    assert.equal(classifyPickupConfirmReply("yes"), "proceed");
+    assert.equal(classifyPickupConfirmReply("proceed"), "proceed");
+    assert.equal(classifyPickupConfirmReply("change it"), "change");
+    assert.equal(classifyPickupConfirmReply("no"), "change");
+  });
+});
+
+describe("query cleanup", () => {
+  it("strips pickup phrasing from a place query", () => {
+    assert.equal(sanitizePlaceQuery("pick me up from Dubai Marina Mall"), "Dubai Marina Mall");
+    assert.equal(sanitizePlaceQuery("from Marina"), "Marina");
   });
 });
